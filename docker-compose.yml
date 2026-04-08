@@ -1,0 +1,35 @@
+services:
+  whisper:
+    build: ./whisper
+    container_name: whisper
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-small}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+    ports:
+      - "8100:8000"
+    volumes:
+      - ./whisper_cache:/root/.cache/huggingface
+    networks:
+      - hakaton
+    restart: unless-stopped
+
+  chromadb:
+    image: chromadb/chroma:0.5.20
+    container_name: chromadb
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/.chroma
+      - ANONYMIZED_TELEMETRY=FALSE
+    ports:
+      - "8200:8000"
+    volumes:
+      - ./chroma_data:/chroma/.chroma
+    networks:
+      - hakaton
+    restart: unless-stopped
+
+networks:
+  hakaton:
+    driver: bridge
+    name: hakaton
