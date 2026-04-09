@@ -176,3 +176,317 @@ hakaton/
   попадает — `.env` в `.gitignore`.
 - Whisper-модель по умолчанию `small` — перейти на `medium`, если будет
   заметная потеря качества на русском.
+
+
+# GPTHub — Frontend
+
+React-приложение: мультимодельный AI-чат с голосовым вводом, работой с файлами и долгосрочной памятью.
+
+**Стек:** React 19 · TypeScript · Vite · Tailwind CSS v4 · Zustand · React Router · MSW (моки)
+
+---
+
+## Быстрый старт
+
+```bash
+npm install
+npm run dev       # http://localhost:5173
+npm run build     # продакшн-сборка в dist/
+```
+
+---
+
+## Режим разработки (без бэкенда)
+
+В dev-режиме все запросы перехватывает **MSW (Mock Service Worker)** — бэкенд не нужен.  
+Моки живут в `src/mocks/handlers.ts`, сервис-воркер — `public/mockServiceWorker.js`.
+
+Что работает в моках:
+- Стриминговый чат (SSE, ответы адаптируются под модель и контент запроса)
+- Загрузка файлов
+- Голосовая транскрипция (случайная фраза)
+- Память (полноценный in-memory CRUD с поиском)
+- Список моделей
+
+Чтобы **отключить моки** и перейти на реальный бэкенд — удали или закомментируй вызов `enableMocking()` в `src/main.tsx`.
+
+---
+
+## Подключение бэкенда
+
+### 1. Переменная окружения
+
+Создай `.env.local` в корне `frontend/`:
+
+```env
+VITE_API_BASE_URL=http://localhost:8000/api
+```
+
+По умолчанию (если переменная не задана) запросы идут на `/api` — проксируются Vite (см. `vite.config.ts`).
+
+### 2. Vite proxy (для dev)
+
+В `vite.config.ts` уже настроен прокси:
+
+```
+/api  →  http://localhost:8000
+```
+
+Поменяй `target` под свой порт бэкенда.
+
+---
+
+## API-контракт
+
+Все запросы идут на `BASE_URL` (по умолчанию `/api`).  
+Реализуй эти эндпоинты на бэкенде:
+
+---
+
+### Чат
+
+#### `POST /api/chat/completions` — стриминг ответа
+
+**Тело запроса:**
+```json
+{
+  "conversation_id": "string",
+  "message": "string",
+  "model": "gpt-4o | mistral-7b | llama3-8b | deepseek-coder | dall-e-3",
+  "file_ids": ["string"]
+}
+```
+
+**Ответ:** `text/event-stream`, SSE-чанки:
+```
+data: {"delta": "часть текста "}
+
+data: {"delta": "ещё часть "}
+
+data: [DONE]
+```
+
+> Для Ollama: оборачивай `/api/chat` в этот SSE-формат.  
+> Для OpenAI: пробрасывай `stream: true`, конвертируй `choices[0].delta.content` → `{"delta": "..."}`.
+
+---
+
+### Разговоры
+
+| Метод | Путь | Тело | Ответ |
+|-------|------|------|-------|
+| `GET` | `/api/conversations` | — | `Conversation[]` |
+| `GET` | `/api/conversations/:id/messages` | — | `Message[]` |
+| `DELETE` | `/api/conversations/:id` | — | `204` |
+
+```ts
+// Типы
+interface Conversation {
+  id: string
+  title: string
+  model: string
+  createdAt: number   // unix ms
+  updatedAt: number
+}
+
+interface Message {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  model?: string
+  timestamp: number
+}
+```
+
+> **Примечание:** история чатов сейчас хранится локально в Zustand + localStorage.  
+> Эти эндпоинты нужны для синхронизации между устройствами — можно реализовать позже.
+
+---
+
+### Файлы
+
+#### `POST /api/files/upload` — загрузка файла
+
+**Тело:** `multipart/form-data`, поле `file`
+
+**Ответ:**
+```json
+{
+  "id": "string",
+  "name": "filename.pdf",
+  "size": 12345,
+  "type": "application/pdf"
+}
+```
+
+> Файл нужно сохранить и вернуть `id`, который затем передаётся в `file_ids` при чате.  
+> В `/chat/completions` используй этот `id` для извлечения содержимого через RAG (ChromaDB).
+
+---
+
+### Голос
+
+#### `POST /api/voice/transcribe` — Speech-to-Text
+
+**Тело:** `multipart/form-data`, поле `audio` (blob, `audio/webm`)
+
+**Ответ:**
+```json
+{
+  "text": "распознанный текст"
+}
+```
+
+> **Адаптер к Whisper:** фронт шлёт поле `audio`, Whisper ожидает поле `file`.  
+> Бэкенд должен переименовать поле перед проксированием на `http://localhost:8100/transcribe`.
+
+```python
+# Пример адаптера (FastAPI)
+@app.post("/api/voice/transcribe")
+async def transcribe(audio: UploadFile = File(...)):
+    data = await audio.read()
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            "http://whisper:8000/transcribe",
+            files={"file": (audio.filename, data, audio.content_type)},
+        )
+    return {"text": r.json()["text"]}
+```
+
+#### `POST /api/voice/synthesize` — Text-to-Speech
+
+**Тело:**
+```json
+{ "text": "текст для озвучки" }
+```
+
+**Ответ:** бинарный аудиофайл (`audio/mpeg` или `audio/wav`)
+
+> Ollama не поддерживает TTS. Варианты: Coqui TTS, edge-tts, OpenAI TTS API.  
+> Пока не реализовано — фронт просто не воспроизводит аудио, ошибки нет.
+
+---
+
+### Память
+
+#### `GET /api/memory?query=<строка>` — поиск по памяти
+
+**Ответ:**
+```json
+[
+  {
+    "id": "string",
+    "content": "Пользователь предпочитает краткие ответы",
+    "category": "preference",
+    "createdAt": 1712345678000
+  }
+]
+```
+
+> Используй **Mem0** с ChromaDB (`http://localhost:8200`) + Ollama embeddings (`nomic-embed-text`).  
+> Конфиг уже готов в `../mem0_config.py`.
+
+#### `POST /api/memory` — добавить запись
+
+**Тело:**
+```json
+{
+  "content": "string",
+  "category": "fact | preference | context"
+}
+```
+
+**Ответ:** созданная запись `MemoryEntry`
+
+#### `DELETE /api/memory/:id` — удалить запись
+
+**Ответ:** `204`
+
+---
+
+### Генерация изображений
+
+#### `POST /api/images/generate`
+
+**Тело:**
+```json
+{ "prompt": "string" }
+```
+
+**Ответ:**
+```json
+{ "url": "https://..." }
+```
+
+> Используй DALL-E 3 (OpenAI API) или llava через Ollama для генерации.
+
+---
+
+## Модели
+
+Текущий список в `src/lib/constants.ts`. При подключении бэкенда — можно динамически подтягивать через `GET /api/models`:
+
+**Ответ:**
+```json
+[
+  { "id": "llama3:8b", "name": "Llama 3 8B", "provider": "ollama", "capabilities": ["text"] },
+  { "id": "mistral:7b", "name": "Mistral 7B", "provider": "ollama", "capabilities": ["text"] }
+]
+```
+
+> Список доступных моделей в Ollama: `GET http://localhost:11434/api/tags`
+
+---
+
+## Инфраструктура (из repo_clone)
+
+| Сервис | Хост | Назначение |
+|--------|------|------------|
+| Whisper | `localhost:8100` | STT: `POST /transcribe` (поле `file`) |
+| ChromaDB | `localhost:8200` | Vector store для Mem0 / RAG |
+| Ollama | `localhost:11434` | LLM + embeddings (`nomic-embed-text`) |
+| Open WebUI | `localhost:3000` | UI для Ollama (опционально) |
+
+Запуск инфраструктуры:
+```bash
+cd ../repo_clone
+docker compose up -d
+bash scripts/pull_ollama_models.sh
+```
+
+---
+
+## Архитектура фронтенда
+
+```
+src/
+├── components/
+│   ├── chat/         # MessageBubble, ChatInput, MessageList, ModelSelector
+│   ├── voice/        # VoiceRecordButton, TTSPlayButton
+│   ├── file/         # FilePreview
+│   ├── landing/      # FeatureCard
+│   └── layout/       # AppLayout, Sidebar, Header, ThemeProvider
+├── pages/            # LandingPage, ChatPage, SettingsPage
+├── stores/           # Zustand: chat, model, memory, file, voice, ui
+├── services/         # API-клиенты: chatService, voiceService, memoryService, fileService
+├── hooks/            # useChat, useVoiceRecording, useFileUpload, ...
+├── mocks/            # MSW handlers (dev-only)
+├── lib/              # constants, modelRouter, utils
+└── types/            # TypeScript-интерфейсы
+```
+
+**Поток данных чата:**
+```
+ChatInput → useChat hook → chatService.streamMessage()
+  → POST /api/chat/completions (SSE)
+  → updateStreamingContent() → chatStore → MessageList
+```
+
+**Роутинг моделей (Auto-режим):**  
+`src/lib/modelRouter.ts` — определяет модель по тексту и прикреплённым файлам:
+- Изображение → `gpt-4o` (vision)
+- Файл/документ → `gpt-4o` (RAG)
+- «нарисуй» / «сгенерируй» → `dall-e-3`
+- Код/функции → `deepseek-coder`
+- Короткий вопрос → `mistral-7b`
+- Всё остальное → `gpt-4o`
