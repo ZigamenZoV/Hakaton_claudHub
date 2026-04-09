@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  /* Light theme */
+  --color-background: #f8f8fb;
+  --color-foreground: #0a0a10;
+  --color-card: #ffffff;
+  --color-card-foreground: #0a0a10;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #0a0a10;
+  --color-primary: #e4002b;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f2f2f5;
+  --color-secondary-foreground: #0a0a10;
+  --color-muted: #f0f0f4;
+  --color-muted-foreground: #72727a;
+  --color-accent: #f0f0f4;
+  --color-accent-foreground: #0a0a10;
+  --color-destructive: #e4002b;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #e4e4ea;
+  --color-input: #e4e4ea;
+  --color-ring: #e4002b;
+  --color-sidebar: #f4f4f8;
+  --color-sidebar-foreground: #0a0a10;
+  --color-sidebar-border: #e4e4ea;
+  --color-user-bubble: #e4002b;
+  --color-user-bubble-foreground: #ffffff;
+  --color-assistant-bubble: #f0f0f4;
+  --color-assistant-bubble-foreground: #0a0a10;
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+}
+
+.dark {
+  /* Dark theme — MTC True Tech style */
+  --color-background: #0b0b0f;
+  --color-foreground: #f0f0f5;
+  --color-card: #13131a;
+  --color-card-foreground: #f0f0f5;
+  --color-popover: #1a1a24;
+  --color-popover-foreground: #f0f0f5;
+  --color-primary: #ff2040;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #1a1a24;
+  --color-secondary-foreground: #f0f0f5;
+  --color-muted: #161620;
+  --color-muted-foreground: #6e6e7a;
+  --color-accent: #1e1e2a;
+  --color-accent-foreground: #f0f0f5;
+  --color-destructive: #ff2040;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #1e1e2c;
+  --color-input: #1e1e2c;
+  --color-ring: #ff2040;
+  --color-sidebar: #0d0d14;
+  --color-sidebar-foreground: #f0f0f5;
+  --color-sidebar-border: #181824;
+  --color-user-bubble: #e4002b;
+  --color-user-bubble-foreground: #ffffff;
+  --color-assistant-bubble: #161620;
+  --color-assistant-bubble-foreground: #f0f0f5;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+#root {
+  min-height: 100dvh;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--color-border);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-muted-foreground);
+}
+
+/* Smooth transitions for theme */
+*, *::before, *::after {
+  transition-property: background-color, border-color;
+  transition-duration: 150ms;
+  transition-timing-function: ease;
+}
+
+/* But not for transforms/opacity (would slow animations) */
+button, a, [role="button"] {
+  transition-property: background-color, border-color, color, opacity, transform, box-shadow;
+}
