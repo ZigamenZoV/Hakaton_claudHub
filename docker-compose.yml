@@ -7,7 +7,7 @@ services:
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
     ports:
-      - "8100:8000"
+      - '8100:8000'
     volumes:
       - ./whisper_cache:/root/.cache/huggingface
     networks:
@@ -22,49 +22,57 @@ services:
       - PERSIST_DIRECTORY=/chroma/.chroma
       - ANONYMIZED_TELEMETRY=FALSE
     ports:
-      - "8200:8000"
+      - '8200:8000'
     volumes:
       - ./chroma_data:/chroma/.chroma
     networks:
       - hakaton
     restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
+  backend:
+    build: ./backend
+    container_name: backend
     ports:
-      - "11434:11434"
-    volumes:
-      - ./ollama_data:/root/.ollama
+      - '8000:8000'
+    env_file: .env
     environment:
-      - OLLAMA_KEEP_ALIVE=24h
-      - OLLAMA_HOST=0.0.0.0
+      - MWS_BASE_URL=https://api.gpt.mws.ru
+      - MWS_API_KEY=${MWS_API_KEY:-sk-ewgiaPC3A6pPDYHwR8siVA}
+      - MWS_LLM_MODEL=qwen2.5-72b-instruct
+      - MWS_VLM_MODEL=qwen2.5-vl
+      - MWS_IMAGE_MODEL=qwen-image-lightning
+      - MWS_EMBED_MODEL=bge-m3
+      - MWS_ASR_MODEL=whisper-medium
+      - USE_MWS_ASR=true
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - WHISPER_URL=http://whisper:8000/transcribe
+      - RAG_COLLECTION=rag_docs
+      - MEM0_COLLECTION=mem0_main
+    depends_on:
+      - chromadb
+      - whisper
     networks:
       - hakaton
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui
     ports:
-      - "3000:8080"
+      - '3000:8080'
     volumes:
       - ./open_webui_data:/app/backend/data
     environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - OPENAI_API_BASE_URL=https://api.openai.com/v1
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE_URL=http://backend:8000/v1
+      - OPENAI_API_KEY=gpthub
       - ENABLE_OPENAI_API=true
-      - WEBUI_AUTH=${WEBUI_AUTH:-True}
+      - ENABLE_OLLAMA_API=false
+      - OLLAMA_BASE_URL=
+      - WEBUI_AUTH=${WEBUI_AUTH:-False}
+      - WEBUI_NAME=GPTHub
     depends_on:
-      - ollama
+      - backend
     networks:
       - hakaton
     restart: unless-stopped
