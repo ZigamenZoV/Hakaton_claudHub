@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { Conversation, Message } from '@/types/chat'
+import type { TaskCategory } from '@/lib/modelRouter'
 import { generateId } from '@/lib/utils'
 
 interface ChatState {
@@ -14,7 +15,7 @@ interface ChatState {
   setActiveConversation: (id: string | null) => void
   addMessage: (conversationId: string, message: Message) => void
   updateStreamingContent: (chunk: string) => void
-  finalizeStreaming: (model?: string) => void
+  finalizeStreaming: (model?: string, taskCategory?: TaskCategory) => void
   deleteConversation: (id: string) => void
   renameConversation: (id: string, title: string) => void
   clearStreaming: () => void
@@ -77,7 +78,7 @@ export const useChatStore = create<ChatState>()(
         }))
       },
 
-      finalizeStreaming: (model) => {
+      finalizeStreaming: (model, taskCategory) => {
         const { activeConversationId, streamingContent } = get()
         if (!activeConversationId || !streamingContent) {
           set({ isStreaming: false, streamingContent: '' })
@@ -88,6 +89,7 @@ export const useChatStore = create<ChatState>()(
           role: 'assistant',
           content: streamingContent,
           model,
+          taskCategory,
           timestamp: Date.now(),
         }
         get().addMessage(activeConversationId, message)

@@ -3,9 +3,10 @@ import { useNavigate } from 'react-router-dom'
 import { useChatStore } from '@/stores/chatStore'
 import { useModelStore } from '@/stores/modelStore'
 import { useFileStore } from '@/stores/fileStore'
+import { useUIStore } from '@/stores/uiStore'
 import { chatService } from '@/services/chatService'
 import { fileService } from '@/services/fileService'
-import { routeModel } from '@/lib/modelRouter'
+import { routeModel, getTaskCategory, getRouteLabel } from '@/lib/modelRouter'
 import { AUTO_MODEL_ID } from '@/lib/constants'
 import { generateId } from '@/lib/utils'
 import type { Message } from '@/types/chat'
@@ -26,6 +27,10 @@ export function useChat() {
   const { selectedModelId } = useModelStore()
   const { pendingFiles, clearFiles, updateFileStatus } = useFileStore()
 
+  const webSearch = useUIStore((s) => s.webSearchEnabled)
+  const researchMode = useUIStore((s) => s.researchModeEnabled)
+  const presentationMode = useUIStore((s) => s.presentationModeEnabled)
+
   const send = useCallback(
     async (content: string) => {
       if (!content.trim() || isStreaming) return
@@ -37,11 +42,15 @@ export function useChat() {
         navigate(`/chat/${convId}`)
       }
 
-      // Determine model
+      const modeOptions = { webSearch, researchMode, presentationMode }
+
+      // Determine model & task category
       const model =
         selectedModelId === AUTO_MODEL_ID
-          ? routeModel(content, pendingFiles)
+          ? routeModel(content, pendingFiles, modeOptions)
           : selectedModelId
+
+      const taskCategory = getTaskCategory(content, pendingFiles, modeOptions)
 
       // Upload files if any
       const uploadedFileIds: string[] = []
@@ -66,22 +75,27 @@ export function useChat() {
         role: 'user',
         content,
         files: filesSnapshot,
+        taskCategory,
         timestamp: Date.now(),
       }
       addMessage(convId, userMsg)
 
       // Stream assistant response
       try {
-        const stream = chatService.streamMessage(
-          convId,
+        const stream = chatService.streamMessage({
+          conversationId: convId,
           content,
           model,
-          uploadedFileIds
-        )
+          fileIds: uploadedFileIds,
+          taskCategory,
+          webSearch,
+          researchMode,
+          presentationMode,
+        })
         for await (const chunk of stream) {
           updateStreamingContent(chunk)
         }
-        finalizeStreaming(model)
+        finalizeStreaming(model, taskCategory)
       } catch (err) {
         console.error('Chat error:', err)
         clearStreaming()
@@ -92,6 +106,9 @@ export function useChat() {
       isStreaming,
       selectedModelId,
       pendingFiles,
+      webSearch,
+      researchMode,
+      presentationMode,
       navigate,
       createConversation,
       addMessage,

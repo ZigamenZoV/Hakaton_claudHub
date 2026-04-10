@@ -3,6 +3,7 @@ import { ThemeToggle } from '@/components/layout/ThemeToggle'
 import { useMemoryStore } from '@/stores/memoryStore'
 import { useModelStore } from '@/stores/modelStore'
 import { MODELS, AUTO_MODEL_ID } from '@/lib/constants'
+import { MEMORY_CATEGORY_LABELS, MEMORY_CATEGORY_COLORS } from '@/types/memory'
 import { cn } from '@/lib/utils'
 import { formatDate } from '@/lib/utils'
 
@@ -99,9 +100,12 @@ export function SettingsPage() {
               {memories.map((m) => (
                 <div key={m.id} className="flex items-start justify-between gap-3 px-4 py-3">
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-[var(--color-foreground)]">{m.content}</p>
+                    <span className={cn('text-[10px] font-bold uppercase tracking-wider', MEMORY_CATEGORY_COLORS[m.category]?.split(' ')[0])}>
+                      {MEMORY_CATEGORY_LABELS[m.category] ?? m.category}
+                    </span>
+                    <p className="text-sm text-[var(--color-foreground)] mt-0.5">{m.content}</p>
                     <p className="text-xs text-[var(--color-muted-foreground)] mt-0.5">
-                      {m.category} · {formatDate(m.createdAt)}
+                      {formatDate(m.createdAt)}
                     </p>
                   </div>
                   <button

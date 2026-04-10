@@ -38,6 +38,7 @@ export function ChatContainer() {
             messages={currentMessages}
             isStreaming={isStreaming}
             streamingContent={streamingContent}
+            onRegenerate={send}
           />
         )}
       </div>

@@ -10,4 +10,14 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  server: {
+    proxy: {
+      // Проксировать /api на бэкенд (поменяй порт под свой)
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        // rewrite: (path) => path.replace(/^\/api/, ''), // раскомментировать если бэкенд без /api префикса
+      },
+    },
+  },
 })

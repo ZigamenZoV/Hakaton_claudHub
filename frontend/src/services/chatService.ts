@@ -1,18 +1,29 @@
 import { request, streamRequest } from './api'
 import type { Conversation, Message } from '@/types/chat'
+import type { TaskCategory } from '@/lib/modelRouter'
+
+export interface ChatRequestOptions {
+  conversationId: string
+  content: string
+  model: string
+  fileIds?: string[]
+  taskCategory?: TaskCategory
+  webSearch?: boolean
+  researchMode?: boolean
+  presentationMode?: boolean
+}
 
 export const chatService = {
-  streamMessage(
-    conversationId: string,
-    content: string,
-    model: string,
-    fileIds: string[] = []
-  ): AsyncGenerator<string> {
+  streamMessage(opts: ChatRequestOptions): AsyncGenerator<string> {
     return streamRequest('/chat/completions', {
-      conversation_id: conversationId,
-      message: content,
-      model,
-      file_ids: fileIds,
+      conversation_id: opts.conversationId,
+      message: opts.content,
+      model: opts.model,
+      file_ids: opts.fileIds ?? [],
+      task_category: opts.taskCategory,
+      web_search: opts.webSearch ?? false,
+      research_mode: opts.researchMode ?? false,
+      presentation_mode: opts.presentationMode ?? false,
     })
   },
 

@@ -2,47 +2,28 @@ import type { Model } from '@/types/model'
 
 export const MODELS: Model[] = [
   {
-    id: 'gpt-4o',
-    name: 'GPT-4o',
-    provider: 'openai',
+    id: 'mws-gpt-alpha',
+    name: 'MWS GPT Alpha',
+    provider: 'mws',
     capabilities: ['text', 'vision', 'large_context'],
     contextWindow: 128000,
   },
   {
-    id: 'gpt-4o-mini',
-    name: 'GPT-4o Mini',
-    provider: 'openai',
-    capabilities: ['text', 'vision'],
-    contextWindow: 128000,
-  },
-  {
-    id: 'deepseek-coder',
-    name: 'DeepSeek Coder',
-    provider: 'ollama',
+    id: 'kodify-2.0',
+    name: 'Kodify 2.0',
+    provider: 'mws',
     capabilities: ['text', 'code'],
-    contextWindow: 16384,
+    contextWindow: 32000,
   },
   {
-    id: 'mistral-7b',
-    name: 'Mistral 7B',
-    provider: 'ollama',
-    capabilities: ['text'],
-    contextWindow: 8192,
-  },
-  {
-    id: 'llama3-8b',
-    name: 'Llama 3 8B',
-    provider: 'ollama',
-    capabilities: ['text'],
-    contextWindow: 8192,
-  },
-  {
-    id: 'dall-e-3',
-    name: 'DALL-E 3',
-    provider: 'openai',
-    capabilities: ['image_gen'],
-    contextWindow: 0,
+    id: 'cotype-preview-32k',
+    name: 'CoType Preview 32K',
+    provider: 'mws',
+    capabilities: ['text', 'large_context'],
+    contextWindow: 32768,
   },
 ]
 
 export const AUTO_MODEL_ID = 'auto'
+
+export const MWS_API_BASE = 'https://api.gpt.mws.ru'
