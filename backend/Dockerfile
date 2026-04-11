@@ -8,10 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     libgdk-pixbuf-xlib-2.0-0 \
     fonts-dejavu \
-    ca-certificates \
-    curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && update-ca-certificates
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

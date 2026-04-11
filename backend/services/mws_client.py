@@ -26,7 +26,7 @@ MODELS = {
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
 async def chat_complete(messages: list[dict], model: str | None = None) -> str:
-    async with httpx.AsyncClient(timeout=60, verify=False) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             f"{MWS_BASE}/v1/chat/completions",
             headers=_HEADERS,
@@ -39,7 +39,7 @@ async def chat_complete(messages: list[dict], model: str | None = None) -> str:
 async def chat_stream(
     messages: list[dict], model: str | None = None
 ) -> AsyncIterator[str]:
-    async with httpx.AsyncClient(timeout=120, verify=False) as client:
+    async with httpx.AsyncClient(timeout=120) as client:
         async with client.stream(
             "POST",
             f"{MWS_BASE}/v1/chat/completions",
@@ -64,7 +64,7 @@ async def chat_stream(
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
 async def embed(texts: list[str]) -> list[list[float]]:
-    async with httpx.AsyncClient(timeout=30, verify=False) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             f"{MWS_BASE}/v1/embeddings",
             headers=_HEADERS,
@@ -77,7 +77,7 @@ async def embed(texts: list[str]) -> list[list[float]]:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
 async def generate_image(prompt: str) -> str:
-    async with httpx.AsyncClient(timeout=90, verify=False) as client:
+    async with httpx.AsyncClient(timeout=90) as client:
         r = await client.post(
             f"{MWS_BASE}/v1/images/generations",
             headers=_HEADERS,
@@ -96,7 +96,7 @@ async def generate_image(prompt: str) -> str:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
 async def transcribe_audio(audio_data: bytes, filename: str, content_type: str) -> str:
-    async with httpx.AsyncClient(timeout=60, verify=False) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             f"{MWS_BASE}/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {MWS_KEY}"},
@@ -126,7 +126,7 @@ async def chat_with_image(
 
 
 async def list_models() -> list[dict]:
-    async with httpx.AsyncClient(timeout=10, verify=False) as client:
+    async with httpx.AsyncClient(timeout=10) as client:
         r = await client.get(f"{MWS_BASE}/v1/models", headers=_HEADERS)
         r.raise_for_status()
         return r.json().get("data", [])

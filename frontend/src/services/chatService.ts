@@ -7,6 +7,7 @@ export interface ChatRequestOptions {
   content: string
   model: string
   fileIds?: string[]
+  imageUrl?: string
   taskCategory?: TaskCategory
   webSearch?: boolean
   researchMode?: boolean
@@ -20,6 +21,7 @@ export const chatService = {
       message: opts.content,
       model: opts.model,
       file_ids: opts.fileIds ?? [],
+      image_url: opts.imageUrl ?? null,
       task_category: opts.taskCategory,
       web_search: opts.webSearch ?? false,
       research_mode: opts.researchMode ?? false,

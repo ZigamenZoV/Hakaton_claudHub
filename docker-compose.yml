@@ -13,6 +13,12 @@ services:
     networks:
       - hakaton
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   chromadb:
     image: chromadb/chroma:0.5.20
@@ -28,6 +34,12 @@ services:
     networks:
       - hakaton
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   backend:
     build: ./backend
@@ -50,11 +62,19 @@ services:
       - RAG_COLLECTION=rag_docs
       - MEM0_COLLECTION=mem0_main
     depends_on:
-      - chromadb
-      - whisper
+      chromadb:
+        condition: service_healthy
+      whisper:
+        condition: service_started
     networks:
       - hakaton
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
@@ -72,7 +92,8 @@ services:
       - WEBUI_AUTH=${WEBUI_AUTH:-False}
       - WEBUI_NAME=GPTHub
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - hakaton
     restart: unless-stopped

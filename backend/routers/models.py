@@ -6,6 +6,15 @@ from services import mws_client
 
 router = APIRouter(prefix="/api/models", tags=["models"])
 
+# Known capabilities per model
+_MODEL_CAPS = {
+    "qwen2.5-72b-instruct": ["text", "code", "research"],
+    "qwen2.5-vl": ["text", "vision"],
+    "qwen-image-lightning": ["image_generation"],
+    "bge-m3": ["embeddings"],
+    "whisper-medium": ["asr"],
+}
+
 
 @router.get("")
 async def list_models():
@@ -18,7 +27,7 @@ async def list_models():
             "id": m["id"],
             "name": m.get("id", ""),
             "provider": "mws",
-            "capabilities": ["text"],
+            "capabilities": _MODEL_CAPS.get(m["id"], ["text"]),
         }
         for m in models
     ]

@@ -42,8 +42,18 @@ export async function* streamRequest(
       const payload = trimmed.slice(5).trim()
       if (payload === '[DONE]') return
       try {
-        const parsed = JSON.parse(payload) as { delta?: string }
+        const parsed = JSON.parse(payload) as {
+          delta?: string
+          route?: { task: string; reason: string; model?: string }
+          image_url?: string
+          error?: string
+        }
+        // Text delta
         if (parsed.delta) yield parsed.delta
+        // Image generation result — render as markdown image
+        if (parsed.image_url) yield `![Generated image](${parsed.image_url})`
+        // Route info — yield as a small indicator
+        if (parsed.route) yield `\n<!-- route: ${parsed.route.task} -->\n`
       } catch {
         // skip malformed lines
       }

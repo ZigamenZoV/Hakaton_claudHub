@@ -38,3 +38,13 @@ def delete_memory(memory_id: str):
         mem_svc.delete(memory_id)
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.get("/stats")
+async def memory_stats(user_id: str = Query(DEFAULT_USER)):
+    """Return memory statistics for the user."""
+    all_memories = mem_svc.get_all(user_id=user_id)
+    return {
+        "total": len(all_memories),
+        "user_id": user_id,
+    }

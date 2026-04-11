@@ -123,7 +123,7 @@ async def run(query: str, user_id: str = "default") -> AsyncIterator[str]:
         yield _sse("done", refs="")
         return
 
-    yield _sse("synthesize", message=f"Синтезирую отчёт из {len(sources)} источников...")
+    yield _sse("synthesize", message=f"Синтезирую отчёт из {len(sources)} источн��ков...")
 
     sources_text = "\n\n".join(
         f"[{i+1}] {s['title']}\nURL: {s['url']}\n{s['content']}"

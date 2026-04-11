@@ -57,8 +57,19 @@ export function useChat() {
       const filesSnapshot = [...pendingFiles]
       clearFiles()
 
+      // Extract image preview URL for VLM (first image attachment)
+      let imageUrl: string | undefined
+      for (const f of filesSnapshot) {
+        if (f.type.startsWith('image/') && f.preview) {
+          imageUrl = f.preview
+          break
+        }
+      }
+
       for (const f of filesSnapshot) {
         if (!f.blob) continue
+        // Skip image files from upload to /api/files — they go via image_url
+        if (f.type.startsWith('image/')) continue
         try {
           updateFileStatus(f.id, 'uploading')
           const uploaded = await fileService.uploadFile(f.blob)
@@ -87,6 +98,7 @@ export function useChat() {
           content,
           model,
           fileIds: uploadedFileIds,
+          imageUrl,
           taskCategory,
           webSearch,
           researchMode,

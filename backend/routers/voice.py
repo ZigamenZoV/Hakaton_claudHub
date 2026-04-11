@@ -17,15 +17,18 @@ async def transcribe(audio: UploadFile = File(...)):
     if not data:
         raise HTTPException(status_code=400, detail="empty audio")
 
+    # Try MWS ASR first (cloud, faster)
     if USE_MWS_ASR:
         from services.mws_client import transcribe_audio
         try:
-            text = await transcribe_audio(data, audio.filename or "audio.webm", audio.content_type or "audio/webm")
-            return {"text": text}
-        except Exception as e:
-            # fallback to local whisper
-            pass
+            text = await transcribe_audio(
+                data, audio.filename or "audio.webm", audio.content_type or "audio/webm"
+            )
+            return {"text": text, "source": "mws"}
+        except Exception:
+            pass  # fallback to local whisper
 
+    # Fallback to local whisper service
     async with httpx.AsyncClient(timeout=60) as client:
         try:
             r = await client.post(
@@ -36,4 +39,4 @@ async def transcribe(audio: UploadFile = File(...)):
         except httpx.HTTPError as e:
             raise HTTPException(status_code=502, detail=f"whisper error: {e}") from e
 
-    return {"text": r.json().get("text", "")}
+    return {"text": r.json().get("text", ""), "source": "local_whisper"}

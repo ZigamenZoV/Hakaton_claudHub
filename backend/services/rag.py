@@ -57,13 +57,19 @@ async def ingest(file_id: str, text: str, metadata: dict | None = None) -> int:
 async def search(query: str, file_ids: list[str] | None = None) -> list[str]:
     client = _get_client()
     col = client.get_or_create_collection(RAG_COLLECTION)
+    count = col.count()
+    if count == 0:
+        return []
     vectors = await embed([query])
     where = {"file_id": {"$in": file_ids}} if file_ids else None
-    kwargs: dict = {"query_embeddings": vectors, "n_results": TOP_K}
+    kwargs: dict = {"query_embeddings": vectors, "n_results": min(TOP_K, count)}
     if where:
         kwargs["where"] = where
-    result = col.query(**kwargs)
-    return result["documents"][0] if result["documents"] else []
+    try:
+        result = col.query(**kwargs)
+        return result["documents"][0] if result["documents"] else []
+    except Exception:
+        return []
 
 
 def delete_file(file_id: str) -> None:

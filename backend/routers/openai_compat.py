@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from services import memory as mem_svc
-from services import mws_client
+from services import mws_client, rag
 from services.router import TaskType, route
 
 router = APIRouter(prefix="/v1", tags=["openai-compat"])
@@ -17,10 +17,14 @@ router = APIRouter(prefix="/v1", tags=["openai-compat"])
 DEFAULT_USER = "default"
 _URL_RE = re.compile(r"https?://\S+")
 
+SYSTEM_PROMPT = """\
+Ты — GPTHub, умный ИИ-ассистент. Отвечай точно, полезно и дружелюбно.
+Используй markdown для форматирования, когда это уместно."""
+
 
 class OAIMessage(BaseModel):
     role: str
-    content: Any
+    content: Any  # str or list of content parts
 
 
 class OAIChatRequest(BaseModel):
@@ -35,8 +39,7 @@ def _extract_text(content: Any) -> str:
         return content
     if isinstance(content, list):
         return " ".join(
-            p.get("text", "") for p in content
-            if isinstance(p, dict) and p.get("type") == "text"
+            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
         )
     return str(content)
 
@@ -70,26 +73,6 @@ def _to_mws_messages(messages: list[OAIMessage]) -> list[dict]:
     return result
 
 
-def _oai_chunk(
-    model: str,
-    content: str = "",
-    role: str | None = None,
-    finish_reason: str | None = None,
-) -> str:
-    delta: dict = {}
-    if role:
-        delta["role"] = role
-    if content:
-        delta["content"] = content
-    payload = {
-        "id": "chatcmpl-gpthub",
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
-    }
-    return f"data: {json.dumps(payload)}\n\n"
-
-
 @router.get("/models")
 async def list_models():
     try:
@@ -114,25 +97,46 @@ async def chat_completions(request: OAIChatRequest):
     has_image = _has_image(request.messages)
     routing = route(message=user_message, has_image=has_image)
 
+    # --- Memory retrieval ---
     mem_results = await mem_svc.search(user_message, user_id=request.user)
     memory_facts = [r["content"] for r in mem_results]
 
+    # --- RAG retrieval (search across all recent documents) ---
+    rag_chunks: list[str] = []
+    if not has_image and routing.task not in (TaskType.IMAGE_GEN,):
+        try:
+            rag_chunks = await rag.search(user_message)
+        except Exception:
+            pass
+
     messages = _to_mws_messages(request.messages)
 
+    # --- Inject memory + RAG into system prompt ---
+    injection_parts: list[str] = []
     if memory_facts:
         facts = "\n".join(f"- {f}" for f in memory_facts)
-        injection = f"Факты о пользователе из памяти:\n{facts}"
+        injection_parts.append(f"📝 Факты о пользователе из долговременной памяти:\n{facts}")
+    if rag_chunks:
+        ctx = "\n\n".join(rag_chunks[:3])  # top 3 chunks
+        injection_parts.append(f"📄 Контекст из загруженных документов:\n{ctx}")
+
+    if injection_parts:
+        injection = "\n\n".join(injection_parts)
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] += f"\n\n{injection}"
         else:
-            messages.insert(0, {"role": "system", "content": injection})
+            messages.insert(0, {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{injection}"})
+    elif not messages or messages[0]["role"] != "system":
+        messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
 
+    # --- Image generation ---
     is_image_model = "image" in request.model.lower()
     if routing.task == TaskType.IMAGE_GEN or is_image_model:
         return await _image_gen_oai(user_message, request.stream)
 
     model = routing.model if has_image else request.model
 
+    # --- URL fetching: auto-inject page content when user sends a link ---
     url_match = _URL_RE.search(user_message)
     if url_match:
         from services.research import fetch_url
@@ -150,21 +154,19 @@ async def chat_completions(request: OAIChatRequest):
         )
 
     content = await mws_client.chat_complete(messages, model=model)
-    await mem_svc.add(
-        f"User: {user_message[:200]}\nAssistant: {content[:200]}",
-        user_id=request.user,
-    )
+
+    # Save facts to memory (non-blocking)
+    try:
+        await mem_svc.extract_and_save(user_message, content, user_id=request.user)
+    except Exception:
+        pass
 
     return {
         "id": "chatcmpl-gpthub",
         "object": "chat.completion",
         "model": model,
         "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
-            }
+            {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
@@ -180,11 +182,35 @@ async def _stream_oai(
         yield _oai_chunk(model, content=delta)
     yield _oai_chunk(model, finish_reason="stop")
     yield "data: [DONE]\n\n"
+
+    # Save facts to memory (non-blocking)
     if full:
-        await mem_svc.add(
-            f"User: {user_message[:200]}\nAssistant: {''.join(full)[:200]}",
-            user_id=user_id,
-        )
+        try:
+            await mem_svc.extract_and_save(
+                user_message, "".join(full), user_id=user_id,
+            )
+        except Exception:
+            pass
+
+
+def _oai_chunk(
+    model: str,
+    content: str = "",
+    role: str | None = None,
+    finish_reason: str | None = None,
+) -> str:
+    delta: dict = {}
+    if role:
+        delta["role"] = role
+    if content:
+        delta["content"] = content
+    payload = {
+        "id": "chatcmpl-gpthub",
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 async def _image_gen_oai(prompt: str, stream: bool):
@@ -207,10 +233,6 @@ async def _image_gen_oai(prompt: str, stream: bool):
         "object": "chat.completion",
         "model": "qwen-image-lightning",
         "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
-            }
+            {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
         ],
     }
