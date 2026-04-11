@@ -17,18 +17,18 @@ class MemoryCreate(BaseModel):
 
 
 @router.get("")
-def get_memory(
+async def get_memory(
     query: str | None = Query(None),
     user_id: str = Query(DEFAULT_USER),
 ):
     if query:
-        return mem_svc.search(query, user_id=user_id)
+        return await mem_svc.search(query, user_id=user_id)
     return mem_svc.get_all(user_id=user_id)
 
 
 @router.post("", status_code=201)
-def add_memory(body: MemoryCreate):
-    mem_svc.add(body.content, user_id=body.user_id)
+async def add_memory(body: MemoryCreate):
+    await mem_svc.add(body.content, user_id=body.user_id)
     return {"status": "ok"}
 
 

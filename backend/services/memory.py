@@ -1,87 +1,86 @@
 from __future__ import annotations
 
 import os
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
-from mem0 import Memory
+import chromadb
+from chromadb.config import Settings
 
-MWS_BASE = os.getenv("MWS_BASE_URL", "https://api.gpt.mws.ru")
-MWS_KEY = os.getenv("MWS_API_KEY", "sk-ewgiaPC3A6pPDYHwR8siVA")
+from services.mws_client import embed
+
 CHROMA_HOST = os.getenv("CHROMA_HOST", "chromadb")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 MEM0_COLLECTION = os.getenv("MEM0_COLLECTION", "mem0_main")
-MWS_LLM_MODEL = os.getenv("MWS_LLM_MODEL", "mws-gpt-alpha")
-MWS_EMBED_MODEL = os.getenv("MWS_EMBED_MODEL", "bge-m3")
-
-_MEM0_CONFIG = {
-    "vector_store": {
-        "provider": "chroma",
-        "config": {
-            "collection_name": MEM0_COLLECTION,
-            "host": CHROMA_HOST,
-            "port": CHROMA_PORT,
-        },
-    },
-    "embedder": {
-        "provider": "openai",
-        "config": {
-            "model": MWS_EMBED_MODEL,
-            "api_key": MWS_KEY,
-            "openai_base_url": f"{MWS_BASE}/v1",
-        },
-    },
-    "llm": {
-        "provider": "openai",
-        "config": {
-            "model": MWS_LLM_MODEL,
-            "api_key": MWS_KEY,
-            "openai_base_url": f"{MWS_BASE}/v1",
-            "temperature": 0.1,
-        },
-    },
-}
-
-_memory: Memory | None = None
 
 
-def get_memory() -> Memory:
-    global _memory
-    if _memory is None:
-        _memory = Memory.from_config(_MEM0_CONFIG)
-    return _memory
+def _col():
+    client = chromadb.HttpClient(
+        host=CHROMA_HOST,
+        port=CHROMA_PORT,
+        settings=Settings(anonymized_telemetry=False),
+    )
+    return client.get_or_create_collection(MEM0_COLLECTION)
 
 
-def add(content: str, user_id: str) -> None:
-    get_memory().add(content, user_id=user_id)
+async def add(content: str, user_id: str) -> None:
+    vectors = await embed([content])
+    col = _col()
+    col.upsert(
+        ids=[str(uuid.uuid4())],
+        embeddings=vectors,
+        documents=[content],
+        metadatas=[{
+            "user_id": user_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }],
+    )
 
 
-def search(query: str, user_id: str, limit: int = 5) -> list[dict[str, Any]]:
-    result = get_memory().search(query=query, user_id=user_id, limit=limit)
-    items = result.get("results", result) if isinstance(result, dict) else result
-    return [
-        {
-            "id": str(r.get("id", "")),
-            "content": r.get("memory", r.get("content", "")),
-            "category": r.get("metadata", {}).get("category", "fact"),
-            "createdAt": r.get("created_at", 0),
-        }
-        for r in items
-    ]
+async def search(query: str, user_id: str, limit: int = 5) -> list[dict[str, Any]]:
+    try:
+        vectors = await embed([query])
+        col = _col()
+        result = col.query(
+            query_embeddings=vectors,
+            n_results=min(limit, col.count()),
+            where={"user_id": user_id},
+        )
+        ids = result["ids"][0]
+        docs = result["documents"][0]
+        metas = result["metadatas"][0]
+        return [
+            {
+                "id": ids[i],
+                "content": docs[i],
+                "category": "fact",
+                "createdAt": metas[i].get("created_at", ""),
+            }
+            for i in range(len(ids))
+        ]
+    except Exception:
+        return []
 
 
 def get_all(user_id: str) -> list[dict[str, Any]]:
-    result = get_memory().get_all(user_id=user_id)
-    items = result.get("results", result) if isinstance(result, dict) else result
-    return [
-        {
-            "id": str(r.get("id", "")),
-            "content": r.get("memory", r.get("content", "")),
-            "category": r.get("metadata", {}).get("category", "fact"),
-            "createdAt": r.get("created_at", 0),
-        }
-        for r in items
-    ]
+    try:
+        col = _col()
+        result = col.get(where={"user_id": user_id})
+        return [
+            {
+                "id": result["ids"][i],
+                "content": result["documents"][i],
+                "category": "fact",
+                "createdAt": result["metadatas"][i].get("created_at", ""),
+            }
+            for i in range(len(result["ids"]))
+            if result["documents"][i]
+        ]
+    except Exception:
+        return []
 
 
 def delete(memory_id: str) -> None:
-    get_memory().delete(memory_id=memory_id)
+    col = _col()
+    col.delete(ids=[memory_id])

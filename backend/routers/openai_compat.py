@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from services import memory as mem_svc
-from services import mws_client, rag
+from services import mws_client
 from services.router import TaskType, route
 
 router = APIRouter(prefix="/v1", tags=["openai-compat"])
@@ -18,14 +18,53 @@ DEFAULT_USER = "default"
 
 class OAIMessage(BaseModel):
     role: str
-    content: str
+    content: Any  # str or list of content parts
 
 
 class OAIChatRequest(BaseModel):
-    model: str = "mws-gpt-alpha"
+    model: str = "qwen2.5-72b-instruct"
     messages: list[OAIMessage]
     stream: bool = False
     user: str = DEFAULT_USER
+
+
+def _extract_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return str(content)
+
+
+def _has_image(messages: list[OAIMessage]) -> bool:
+    for m in messages:
+        if isinstance(m.content, list):
+            for part in m.content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+    return False
+
+
+def _to_mws_messages(messages: list[OAIMessage]) -> list[dict]:
+    result = []
+    for m in messages:
+        if isinstance(m.content, str):
+            result.append({"role": m.role, "content": m.content})
+        elif isinstance(m.content, list):
+            parts = []
+            for part in m.content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    parts.append({"type": "text", "text": part.get("text", "")})
+                elif part.get("type") == "image_url":
+                    parts.append({"type": "image_url", "image_url": part.get("image_url", {})})
+            result.append({"role": m.role, "content": parts})
+        else:
+            result.append({"role": m.role, "content": str(m.content)})
+    return result
 
 
 @router.get("/models")
@@ -33,49 +72,52 @@ async def list_models():
     try:
         models = await mws_client.list_models()
     except Exception:
-        models = [{"id": "mws-gpt-alpha"}, {"id": "kodify-2.0"}, {"id": "cotype-preview-32k"}]
+        models = [
+            {"id": "qwen2.5-72b-instruct"},
+            {"id": "qwen2.5-vl"},
+            {"id": "qwen-image-lightning"},
+        ]
     return {
         "object": "list",
-        "data": [
-            {"id": m["id"], "object": "model", "owned_by": "mws"}
-            for m in models
-        ],
+        "data": [{"id": m["id"], "object": "model", "owned_by": "mws"} for m in models],
     }
 
 
 @router.post("/chat/completions")
 async def chat_completions(request: OAIChatRequest):
-    user_message = next(
-        (m.content for m in reversed(request.messages) if m.role == "user"), ""
+    user_message = _extract_text(
+        next((m.content for m in reversed(request.messages) if m.role == "user"), "")
     )
+    has_image = _has_image(request.messages)
+    routing = route(message=user_message, has_image=has_image)
 
-    routing = route(message=user_message)
-
-    mem_results = mem_svc.search(user_message, user_id=request.user)
+    mem_results = await mem_svc.search(user_message, user_id=request.user)
     memory_facts = [r["content"] for r in mem_results]
 
-    messages = [m.model_dump() for m in request.messages]
+    messages = _to_mws_messages(request.messages)
 
     if memory_facts:
         facts = "\n".join(f"- {f}" for f in memory_facts)
-        system_injection = f"Факты о пользователе из памяти:\n{facts}"
+        injection = f"Факты о пользователе из памяти:\n{facts}"
         if messages and messages[0]["role"] == "system":
-            messages[0]["content"] += f"\n\n{system_injection}"
+            messages[0]["content"] += f"\n\n{injection}"
         else:
-            messages.insert(0, {"role": "system", "content": system_injection})
+            messages.insert(0, {"role": "system", "content": injection})
 
-    if routing.task == TaskType.IMAGE_GEN:
+    is_image_model = "image" in request.model.lower()
+    if routing.task == TaskType.IMAGE_GEN or is_image_model:
         return await _image_gen_oai(user_message, request.stream)
+
+    model = routing.model if has_image else request.model
 
     if request.stream:
         return StreamingResponse(
-            _stream_oai(messages, request.model, request.user, user_message),
+            _stream_oai(messages, model, request.user, user_message),
             media_type="text/event-stream",
         )
 
-    content = await mws_client.chat_complete(messages, model=request.model)
-
-    mem_svc.add(
+    content = await mws_client.chat_complete(messages, model=model)
+    await mem_svc.add(
         f"User: {user_message[:200]}\nAssistant: {content[:200]}",
         user_id=request.user,
     )
@@ -83,13 +125,9 @@ async def chat_completions(request: OAIChatRequest):
     return {
         "id": "chatcmpl-gpthub",
         "object": "chat.completion",
-        "model": request.model,
+        "model": model,
         "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
-            }
+            {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
@@ -99,24 +137,25 @@ async def _stream_oai(
     messages: list[dict], model: str, user_id: str, user_message: str
 ) -> AsyncIterator[str]:
     full: list[str] = []
-
     yield _oai_chunk(model, role="assistant")
-
     async for delta in mws_client.chat_stream(messages, model=model):
         full.append(delta)
         yield _oai_chunk(model, content=delta)
-
     yield _oai_chunk(model, finish_reason="stop")
     yield "data: [DONE]\n\n"
-
     if full:
-        mem_svc.add(
+        await mem_svc.add(
             f"User: {user_message[:200]}\nAssistant: {''.join(full)[:200]}",
             user_id=user_id,
         )
 
 
-def _oai_chunk(model: str, content: str = "", role: str | None = None, finish_reason: str | None = None) -> str:
+def _oai_chunk(
+    model: str,
+    content: str = "",
+    role: str | None = None,
+    finish_reason: str | None = None,
+) -> str:
     delta: dict = {}
     if role:
         delta["role"] = role
@@ -140,16 +179,16 @@ async def _image_gen_oai(prompt: str, stream: bool):
 
     if stream:
         async def gen():
-            yield _oai_chunk("mws-gpt-alpha", role="assistant")
-            yield _oai_chunk("mws-gpt-alpha", content=content)
-            yield _oai_chunk("mws-gpt-alpha", finish_reason="stop")
+            yield _oai_chunk("qwen-image-lightning", role="assistant")
+            yield _oai_chunk("qwen-image-lightning", content=content)
+            yield _oai_chunk("qwen-image-lightning", finish_reason="stop")
             yield "data: [DONE]\n\n"
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     return {
         "id": "chatcmpl-gpthub",
         "object": "chat.completion",
-        "model": "mws-gpt-alpha",
+        "model": "qwen-image-lightning",
         "choices": [
             {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
         ],
