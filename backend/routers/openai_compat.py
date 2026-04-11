@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter
@@ -14,11 +15,12 @@ from services.router import TaskType, route
 router = APIRouter(prefix="/v1", tags=["openai-compat"])
 
 DEFAULT_USER = "default"
+_URL_RE = re.compile(r"https?://\S+")
 
 
 class OAIMessage(BaseModel):
     role: str
-    content: Any  # str or list of content parts
+    content: Any
 
 
 class OAIChatRequest(BaseModel):
@@ -33,7 +35,8 @@ def _extract_text(content: Any) -> str:
         return content
     if isinstance(content, list):
         return " ".join(
-            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+            p.get("text", "") for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
         )
     return str(content)
 
@@ -65,6 +68,26 @@ def _to_mws_messages(messages: list[OAIMessage]) -> list[dict]:
         else:
             result.append({"role": m.role, "content": str(m.content)})
     return result
+
+
+def _oai_chunk(
+    model: str,
+    content: str = "",
+    role: str | None = None,
+    finish_reason: str | None = None,
+) -> str:
+    delta: dict = {}
+    if role:
+        delta["role"] = role
+    if content:
+        delta["content"] = content
+    payload = {
+        "id": "chatcmpl-gpthub",
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 @router.get("/models")
@@ -110,6 +133,16 @@ async def chat_completions(request: OAIChatRequest):
 
     model = routing.model if has_image else request.model
 
+    url_match = _URL_RE.search(user_message)
+    if url_match:
+        from services.research import fetch_url
+        page_content = await fetch_url(url_match.group(0))
+        if page_content and messages and messages[-1]["role"] == "user":
+            if isinstance(messages[-1]["content"], str):
+                messages[-1]["content"] += (
+                    f"\n\nСодержимое страницы {url_match.group(0)}:\n{page_content[:2000]}"
+                )
+
     if request.stream:
         return StreamingResponse(
             _stream_oai(messages, model, request.user, user_message),
@@ -127,7 +160,11 @@ async def chat_completions(request: OAIChatRequest):
         "object": "chat.completion",
         "model": model,
         "choices": [
-            {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
@@ -150,26 +187,6 @@ async def _stream_oai(
         )
 
 
-def _oai_chunk(
-    model: str,
-    content: str = "",
-    role: str | None = None,
-    finish_reason: str | None = None,
-) -> str:
-    delta: dict = {}
-    if role:
-        delta["role"] = role
-    if content:
-        delta["content"] = content
-    payload = {
-        "id": "chatcmpl-gpthub",
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
-    }
-    return f"data: {json.dumps(payload)}\n\n"
-
-
 async def _image_gen_oai(prompt: str, stream: bool):
     try:
         url = await mws_client.generate_image(prompt)
@@ -190,6 +207,10 @@ async def _image_gen_oai(prompt: str, stream: bool):
         "object": "chat.completion",
         "model": "qwen-image-lightning",
         "choices": [
-            {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
         ],
     }
