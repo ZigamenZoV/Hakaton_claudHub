@@ -16,11 +16,15 @@ _HEADERS = {
 }
 
 MODELS = {
-    "llm":   os.getenv("MWS_LLM_MODEL",   "qwen2.5-72b-instruct"),
-    "vlm":   os.getenv("MWS_VLM_MODEL",   "qwen2.5-vl"),
-    "image": os.getenv("MWS_IMAGE_MODEL", "qwen-image-lightning"),
-    "embed": os.getenv("MWS_EMBED_MODEL", "bge-m3"),
-    "asr":   os.getenv("MWS_ASR_MODEL",   "whisper-medium"),
+    "llm":            os.getenv("MWS_LLM_MODEL",            "qwen2.5-72b-instruct"),
+    "llm_fast":       os.getenv("MWS_LLM_FAST_MODEL",       "mws-gpt-alpha"),
+    "llm_research":   os.getenv("MWS_LLM_RESEARCH_MODEL",   "QwQ-32B"),
+    "vlm":            os.getenv("MWS_VLM_MODEL",            "qwen3-vl-30b-a3b-instruct"),
+    "vlm_fallback":   os.getenv("MWS_VLM_FALLBACK_MODEL",   "cotype-pro-vl-32b"),
+    "image":          os.getenv("MWS_IMAGE_MODEL",          "qwen-image-lightning"),
+    "image_fallback": os.getenv("MWS_IMAGE_FALLBACK_MODEL", "qwen-image"),
+    "embed":          os.getenv("MWS_EMBED_MODEL",          "bge-m3"),
+    "asr":            os.getenv("MWS_ASR_MODEL",            "whisper-medium"),
 }
 
 
@@ -75,23 +79,32 @@ async def embed(texts: list[str]) -> list[list[float]]:
         return [item["embedding"] for item in sorted(data, key=lambda x: x["index"])]
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4))
 async def generate_image(prompt: str) -> str:
-    async with httpx.AsyncClient(timeout=90) as client:
-        r = await client.post(
-            f"{MWS_BASE}/v1/images/generations",
-            headers=_HEADERS,
-            json={"model": MODELS["image"], "prompt": prompt, "n": 1},
-        )
-        r.raise_for_status()
-        data = r.json()
-        # handle both url and b64_json responses
-        item = data["data"][0]
-        if "url" in item:
-            return item["url"]
-        if "b64_json" in item:
-            return f"data:image/png;base64,{item['b64_json']}"
-        raise ValueError(f"unexpected image response: {data}")
+    """Генерация изображения, с fallback на qwen-image."""
+    models_to_try = [MODELS["image"], MODELS["image_fallback"]]
+    last_err: Exception | None = None
+
+    for model in models_to_try:
+        try:
+            async with httpx.AsyncClient(timeout=90) as client:
+                r = await client.post(
+                    f"{MWS_BASE}/v1/images/generations",
+                    headers=_HEADERS,
+                    json={"model": model, "prompt": prompt, "n": 1},
+                )
+                r.raise_for_status()
+                data = r.json()
+                item = data["data"][0]
+                if "url" in item:
+                    return item["url"]
+                if "b64_json" in item:
+                    return f"data:image/png;base64,{item['b64_json']}"
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise ValueError(f"image generation failed on all models: {last_err}")
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
@@ -110,6 +123,9 @@ async def transcribe_audio(audio_data: bytes, filename: str, content_type: str) 
 async def chat_with_image(
     messages: list[dict], image_url: str, model: str | None = None
 ) -> AsyncIterator[str]:
+    """VLM-запрос с автоматическим fallback если основная модель вернула 500."""
+    vlm_models = [model] if model else [MODELS["vlm"], MODELS["vlm_fallback"]]
+
     vlm_messages = []
     for m in messages[:-1]:
         vlm_messages.append(m)
@@ -121,7 +137,27 @@ async def chat_with_image(
             {"type": "text", "text": last.get("content", "")},
         ],
     })
-    async for chunk in chat_stream(vlm_messages, model=model or MODELS["vlm"]):
+
+    last_err: Exception | None = None
+    for vlm_model in vlm_models:
+        try:
+            # Пробуем стримить
+            got_any = False
+            async for chunk in chat_stream(vlm_messages, model=vlm_model):
+                got_any = True
+                yield chunk
+            if got_any:
+                return
+        except Exception as e:
+            last_err = e
+            continue
+
+    # Если все VLM упали — fallback на текстовый LLM без картинки
+    text_messages = [
+        {"role": "system", "content": "Пользователь прикрепил изображение, но VLM временно недоступна. Сообщи об этом вежливо и предложи описать картинку текстом."},
+        {"role": "user", "content": last.get("content", "Опиши изображение")},
+    ]
+    async for chunk in chat_stream(text_messages, model=MODELS["llm"]):
         yield chunk
 
 

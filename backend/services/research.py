@@ -3,23 +3,35 @@ from __future__ import annotations
 import json
 import re
 from typing import AsyncIterator
+from urllib.parse import quote_plus
 
 import httpx
 
 from services.mws_client import chat_complete, chat_stream
 
 _PLAN_PROMPT = """\
-You are a research planner. Given the user query, output a JSON array of 3-5 search queries in the same language as the query. Output ONLY the JSON array, no other text.
+Составь список из 3-4 поисковых запросов на русском языке для исследования темы.
+Выведи ТОЛЬКО JSON-массив строк, без пояснений, без markdown.
+Пример: ["запрос 1", "запрос 2", "запрос 3"]
 
-Query: {query}"""
+Тема: {query}"""
 
 _SYNTHESIS_PROMPT = """\
-You are a research analyst. Synthesize the following sources into a comprehensive markdown report with headers and source citations [1], [2], etc. Write in the same language as the query.
+Ты — аналитик. СТРОГО отвечай ТОЛЬКО на русском языке.
 
-Query: {query}
+На основе найденных источников напиши подробный отчёт в формате markdown.
 
-Sources:
-{sources}"""
+Запрос пользователя: {query}
+
+Источники:
+{sources}
+
+Требования:
+- ТОЛЬКО русский язык, никакого китайского или английского
+- Структурированный markdown с заголовками ##
+- Ссылки на источники [1], [2] и т.д.
+- Минимум 300 слов
+- Выводы в конце"""
 
 _CLIENT_KWARGS = {"timeout": 15, "follow_redirects": True, "verify": False}
 
@@ -45,7 +57,7 @@ def _extract_text(html: str, url: str = "") -> str:
     except Exception:
         pass
 
-    # fallback: manual cleanup
+    # fallback: ручная очистка
     html = re.sub(r"<(script|style|head|nav|footer|header)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"\s+", " ", text).strip()
@@ -63,25 +75,87 @@ async def fetch_url(url: str) -> str:
 
 
 async def _ddg_search(query: str) -> list[dict]:
+    """Парсим HTML-страницу DuckDuckGo для получения реальных результатов поиска."""
+    results = []
+
     try:
+        encoded = quote_plus(query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded}&kl=ru-ru"
+
         async with httpx.AsyncClient(**_CLIENT_KWARGS) as client:
-            r = await client.get(
-                "https://api.duckduckgo.com/",
-                params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
-                headers={"User-Agent": "GPTHub/1.0"},
+            r = await client.post(
+                "https://html.duckduckgo.com/html/",
+                data={"q": query, "kl": "ru-ru"},
+                headers={**_HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
             )
-            data = r.json()
-            results = []
-            for item in data.get("RelatedTopics", [])[:5]:
-                if "FirstURL" in item and "Text" in item:
-                    results.append({
-                        "url": item["FirstURL"],
-                        "title": item["Text"][:80],
-                        "snippet": item["Text"],
-                    })
-            return results
+            html = r.text
+
+        # Парсим результаты из HTML
+        # DDG возвращает ссылки в виде //duckduckgo.com/l/?uddg=<encoded_url>
+        snippet_blocks = re.findall(
+            r'class="result__body".*?class="result__snippet"[^>]*>(.*?)</a>',
+            html, re.S
+        )
+        url_blocks = re.findall(
+            r'class="result__url"[^>]*>\s*(.*?)\s*</a>',
+            html, re.S
+        )
+        title_blocks = re.findall(
+            r'class="result__a"[^>]*>(.*?)</a>',
+            html, re.S
+        )
+
+        # Чистим от HTML тегов
+        def clean(s: str) -> str:
+            return re.sub(r"<[^>]+>", "", s).strip()
+
+        for i in range(min(len(title_blocks), len(url_blocks), 8)):
+            title = clean(title_blocks[i])
+            raw_url = clean(url_blocks[i])
+            snippet = clean(snippet_blocks[i]) if i < len(snippet_blocks) else ""
+
+            # Восстанавливаем полный URL если нужно
+            if not raw_url.startswith("http"):
+                raw_url = "https://" + raw_url
+
+            if title and raw_url:
+                results.append({
+                    "url": raw_url,
+                    "title": title[:100],
+                    "snippet": snippet[:200],
+                })
+
     except Exception:
-        return []
+        pass
+
+    # Fallback: пробуем через обычный GET запрос
+    if not results:
+        try:
+            encoded = quote_plus(query)
+            async with httpx.AsyncClient(**_CLIENT_KWARGS) as client:
+                r = await client.get(
+                    f"https://html.duckduckgo.com/html/?q={encoded}&kl=ru-ru",
+                    headers=_HEADERS,
+                )
+                html = r.text
+
+            title_blocks = re.findall(r'class="result__a"[^>]*>(.*?)</a>', html, re.S)
+            url_blocks = re.findall(r'class="result__url"[^>]*>\s*(.*?)\s*</a>', html, re.S)
+
+            def clean(s: str) -> str:
+                return re.sub(r"<[^>]+>", "", s).strip()
+
+            for i in range(min(len(title_blocks), len(url_blocks), 8)):
+                title = clean(title_blocks[i])
+                raw_url = clean(url_blocks[i])
+                if not raw_url.startswith("http"):
+                    raw_url = "https://" + raw_url
+                if title and raw_url:
+                    results.append({"url": raw_url, "title": title[:100], "snippet": ""})
+        except Exception:
+            pass
+
+    return results
 
 
 async def run(query: str, user_id: str = "default") -> AsyncIterator[str]:
@@ -90,14 +164,17 @@ async def run(query: str, user_id: str = "default") -> AsyncIterator[str]:
 
     yield _sse("plan", message="Составляю план исследования...")
 
+    # Генерируем поисковые запросы
     plan_raw = await chat_complete(
-        [{"role": "user", "content": _PLAN_PROMPT.format(query=query)}]
+        [{"role": "user", "content": _PLAN_PROMPT.format(query=query)}],
+        model="mws-gpt-alpha",  # быстрая модель для планирования
     )
     try:
         clean = re.sub(r"```json|```", "", plan_raw).strip()
         searches = json.loads(clean)
         if not isinstance(searches, list):
             raise ValueError
+        searches = [s for s in searches if isinstance(s, str)]
     except Exception:
         searches = [query]
 
@@ -107,23 +184,44 @@ async def run(query: str, user_id: str = "default") -> AsyncIterator[str]:
     for i, sq in enumerate(searches, 1):
         yield _sse("search", message=f"Поиск {i}/{len(searches)}: {sq[:60]}")
         results = await _ddg_search(sq)
+
+        if not results:
+            yield _sse("search", message=f"Поиск {i}/{len(searches)}: результатов не найдено, пропускаю")
+            continue
+
         for res in results[:2]:
             url = res.get("url", "")
-            if not url or url in [s["url"] for s in sources]:
+            if not url or any(s["url"] == url for s in sources):
                 continue
+            # Пропускаем нежелательные домены
+            if any(skip in url for skip in ["duckduckgo.com", "duck.com"]):
+                continue
+
             yield _sse("fetch", message=f"Читаю: {url[:70]}...")
             content = await fetch_url(url)
             if content and len(content) > 100:
-                sources.append({"url": url, "title": res.get("title", url), "content": content})
+                sources.append({
+                    "url": url,
+                    "title": res.get("title", url),
+                    "snippet": res.get("snippet", ""),
+                    "content": content,
+                })
+                if len(sources) >= 6:  # максимум 6 источников
+                    break
+
+        if len(sources) >= 6:
+            break
 
     if not sources:
-        yield _sse("error", message="Не удалось найти источники, отвечаю из знаний модели")
-        async for chunk in chat_stream([{"role": "user", "content": query}]):
+        yield _sse("error", message="Не удалось найти источники — отвечаю из знаний модели")
+        async for chunk in chat_stream(
+            [{"role": "user", "content": f"Ответь подробно на русском языке: {query}"}]
+        ):
             yield _sse("delta", delta=chunk)
         yield _sse("done", refs="")
         return
 
-    yield _sse("synthesize", message=f"Синтезирую отчёт из {len(sources)} источн��ков...")
+    yield _sse("synthesize", message=f"Синтезирую отчёт из {len(sources)} источников...")
 
     sources_text = "\n\n".join(
         f"[{i+1}] {s['title']}\nURL: {s['url']}\n{s['content']}"

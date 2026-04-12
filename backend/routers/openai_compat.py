@@ -18,8 +18,18 @@ DEFAULT_USER = "default"
 _URL_RE = re.compile(r"https?://\S+")
 
 SYSTEM_PROMPT = """\
-Ты — GPTHub, умный ИИ-ассистент. Отвечай точно, полезно и дружелюбно.
-Используй markdown для форматирования, когда это уместно."""
+Ты — GPTHub, умный ИИ-ассистент.
+
+ВАЖНО: Всегда отвечай ТОЛЬКО на русском языке. Даже если документ, файл или контекст \
+на другом языке — всё равно отвечай по-русски. Никогда не используй китайский, \
+английский или любой другой язык в ответах.
+
+Правила:
+- Отвечай точно, полезно и дружелюбно
+- Используй markdown для форматирования когда уместно
+- При анализе файлов — пересказывай содержимое на русском языке
+- При генерации изображений — подтверди что начал генерацию
+- При анализе изображений — описывай подробно что видишь на русском"""
 
 
 class OAIMessage(BaseModel):
@@ -56,6 +66,8 @@ def _has_image(messages: list[OAIMessage]) -> bool:
 def _to_mws_messages(messages: list[OAIMessage]) -> list[dict]:
     result = []
     for m in messages:
+        if m.role == "system":
+            continue  # пропускаем system от Open WebUI, вставим свой позже
         if isinstance(m.content, str):
             result.append({"role": m.role, "content": m.content})
         elif isinstance(m.content, list):
@@ -72,7 +84,6 @@ def _to_mws_messages(messages: list[OAIMessage]) -> list[dict]:
             result.append({"role": m.role, "content": str(m.content)})
     return result
 
-
 @router.get("/models")
 async def list_models():
     try:
@@ -80,7 +91,7 @@ async def list_models():
     except Exception:
         models = [
             {"id": "qwen2.5-72b-instruct"},
-            {"id": "qwen2.5-vl"},
+            {"id": "qwen3-vl-30b-a3b-instruct"},
             {"id": "qwen-image-lightning"},
         ]
     return {
@@ -101,7 +112,7 @@ async def chat_completions(request: OAIChatRequest):
     mem_results = await mem_svc.search(user_message, user_id=request.user)
     memory_facts = [r["content"] for r in mem_results]
 
-    # --- RAG retrieval (search across all recent documents) ---
+    # --- RAG retrieval ---
     rag_chunks: list[str] = []
     if not has_image and routing.task not in (TaskType.IMAGE_GEN,):
         try:
@@ -117,8 +128,8 @@ async def chat_completions(request: OAIChatRequest):
         facts = "\n".join(f"- {f}" for f in memory_facts)
         injection_parts.append(f"📝 Факты о пользователе из долговременной памяти:\n{facts}")
     if rag_chunks:
-        ctx = "\n\n".join(rag_chunks[:3])  # top 3 chunks
-        injection_parts.append(f"📄 Контекст из загруженных документов:\n{ctx}")
+        ctx = "\n\n".join(rag_chunks[:3])
+        injection_parts.append(f"📄 Контекст из загруженных документов (перескажи на русском):\n{ctx}")
 
     if injection_parts:
         injection = "\n\n".join(injection_parts)
@@ -133,6 +144,13 @@ async def chat_completions(request: OAIChatRequest):
     is_image_model = "image" in request.model.lower()
     if routing.task == TaskType.IMAGE_GEN or is_image_model:
         return await _image_gen_oai(user_message, request.stream)
+    
+    # --- Deep Research ---
+    if routing.task == TaskType.RESEARCH:
+        return StreamingResponse(
+            _research_oai(user_message, request.user),
+            media_type="text/event-stream",
+        )
 
     model = routing.model if has_image else request.model
 
@@ -155,7 +173,6 @@ async def chat_completions(request: OAIChatRequest):
 
     content = await mws_client.chat_complete(messages, model=model)
 
-    # Save facts to memory (non-blocking)
     try:
         await mem_svc.extract_and_save(user_message, content, user_id=request.user)
     except Exception:
@@ -183,7 +200,6 @@ async def _stream_oai(
     yield _oai_chunk(model, finish_reason="stop")
     yield "data: [DONE]\n\n"
 
-    # Save facts to memory (non-blocking)
     if full:
         try:
             await mem_svc.extract_and_save(
@@ -236,3 +252,76 @@ async def _image_gen_oai(prompt: str, stream: bool):
             {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
         ],
     }
+
+
+async def _research_oai(query: str, user_id: str) -> AsyncIterator[str]:
+    """Оборачивает research SSE в формат OpenAI stream для Open WebUI."""
+    from services.research import run as research_run
+
+    model = "QwQ-32B"
+    yield _oai_chunk(model, role="assistant")
+
+    # Стартовое сообщение
+    yield _oai_chunk(model, content="🔍 **Запускаю Deep Research...**\n\n")
+
+    full_text = []
+    refs = ""
+
+    async for raw in research_run(query, user_id=user_id):
+        # raw это "data: {...}\n\n"
+        if not raw.startswith("data: "):
+            continue
+        try:
+            payload = json.loads(raw[6:].strip())
+        except Exception:
+            continue
+
+        step = payload.get("step", "")
+
+        if step == "plan":
+            chunk = f"📋 {payload.get('message', '')}\n"
+            full_text.append(chunk)
+            yield _oai_chunk(model, content=chunk)
+
+        elif step == "search":
+            chunk = f"🔎 {payload.get('message', '')}\n"
+            full_text.append(chunk)
+            yield _oai_chunk(model, content=chunk)
+
+        elif step == "fetch":
+            chunk = f"📄 {payload.get('message', '')}\n"
+            full_text.append(chunk)
+            yield _oai_chunk(model, content=chunk)
+
+        elif step == "synthesize":
+            chunk = f"\n✍️ {payload.get('message', '')}\n\n"
+            full_text.append(chunk)
+            yield _oai_chunk(model, content=chunk)
+
+        elif step == "delta":
+            delta = payload.get("delta", "")
+            full_text.append(delta)
+            yield _oai_chunk(model, content=delta)
+
+        elif step == "done":
+            refs = payload.get("refs", "")
+            if refs:
+                chunk = f"\n\n---\n**Источники:**\n{refs}"
+                full_text.append(chunk)
+                yield _oai_chunk(model, content=chunk)
+
+        elif step == "error":
+            chunk = f"\n⚠️ {payload.get('message', '')}\n"
+            full_text.append(chunk)
+            yield _oai_chunk(model, content=chunk)
+
+    yield _oai_chunk(model, finish_reason="stop")
+    yield "data: [DONE]\n\n"
+
+    # Сохраняем в память
+    if full_text:
+        try:
+            from services import memory as mem_svc
+            await mem_svc.extract_and_save(query, "".join(full_text), user_id=user_id)
+        except Exception:
+            pass

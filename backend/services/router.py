@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -15,7 +14,7 @@ class TaskType(StrEnum):
     RESEARCH = "research"
 
 
-# ---------- Regex patterns for fast classification ----------
+# ---------- Regex patterns ----------
 _IMAGE_GEN_RE = re.compile(
     r"(нарисуй|сгенерируй\s*(картинк|изображени|image)|создай\s*(картинк|изображени)"
     r"|draw\s|generate\s+image|imagine\s|make\s+(a\s+)?(picture|image|illustration)"
@@ -25,7 +24,7 @@ _IMAGE_GEN_RE = re.compile(
 _RESEARCH_RE = re.compile(
     r"(исследуй|изучи|найди\s+информацию|deep\s+research|проведи\s+анализ"
     r"|расскажи\s+подробно\s+о|проанализируй\s+тему|research\s+about"
-    r"|сделай\s+обзор|найди\s+и\s+обобщи)",
+    r"|сделай\s+обзор|найди\s+и\s+обобщи|что\s+такое\s+.{5,}|обзор\s+на\s+тему)",
     re.I,
 )
 _VLM_RE = re.compile(
@@ -34,16 +33,24 @@ _VLM_RE = re.compile(
     r"|проанализируй\s+(картинк|фото|изображени))",
     re.I,
 )
+_CODE_RE = re.compile(
+    r"(напиши\s+код|write\s+code|implement|debug|баг|bug|функци[юя]|алгоритм"
+    r"|python|typescript|javascript|react|sql\s+запрос)",
+    re.I,
+)
 
-# MWS model mapping per task
+# Модели по задаче
 TASK_MODELS = {
     TaskType.LLM:       "qwen2.5-72b-instruct",
-    TaskType.VLM:       "qwen2.5-vl",
+    TaskType.VLM:       "qwen3-vl-30b-a3b-instruct",
     TaskType.IMAGE_GEN: "qwen-image-lightning",
     TaskType.RAG:       "qwen2.5-72b-instruct",
-    TaskType.RESEARCH:  "qwen2.5-72b-instruct",
+    TaskType.RESEARCH:  "QwQ-32B",
     TaskType.ASR:       "whisper-medium",
 }
+
+# Быстрая модель для простых задач
+FAST_MODEL = "mws-gpt-alpha"
 
 
 @dataclass(slots=True, frozen=True)
@@ -59,46 +66,48 @@ def route(
     has_audio: bool = False,
     has_document: bool = False,
 ) -> RouteResult:
-    """Classify user message into task type using regex (fast, no LLM call).
+    """Классифицирует сообщение в тип задачи через regex (без LLM-вызова).
 
-    Priority order:
-    1. Audio attachment → ASR
-    2. Image attachment → VLM
-    3. Document attachment → RAG
-    4. Image generation keywords → IMAGE_GEN
-    5. Research keywords → RESEARCH
-    6. VLM keywords (without image) → LLM (fallback, since no image attached)
-    7. Default → LLM
+    Приоритет:
+    1. Аудио → ASR
+    2. Изображение → VLM
+    3. Документ → RAG
+    4. Ключевые слова генерации → IMAGE_GEN
+    5. Ключевые слова research → RESEARCH
+    6. Короткое сообщение (<60 символов) → LLM fast (mws-gpt-alpha)
+    7. По умолчанию → LLM
     """
     if has_audio:
-        return RouteResult(TaskType.ASR, "audio attachment detected", TASK_MODELS[TaskType.ASR])
+        return RouteResult(TaskType.ASR, "audio attachment", TASK_MODELS[TaskType.ASR])
 
     if has_image:
-        return RouteResult(TaskType.VLM, "image attachment detected", TASK_MODELS[TaskType.VLM])
+        return RouteResult(TaskType.VLM, "image attachment", TASK_MODELS[TaskType.VLM])
 
     if has_document:
-        return RouteResult(TaskType.RAG, "document attachment detected", TASK_MODELS[TaskType.RAG])
+        return RouteResult(TaskType.RAG, "document attachment", TASK_MODELS[TaskType.RAG])
 
     if _IMAGE_GEN_RE.search(message):
         return RouteResult(TaskType.IMAGE_GEN, "image generation keyword", TASK_MODELS[TaskType.IMAGE_GEN])
 
     if _RESEARCH_RE.search(message):
-        return RouteResult(TaskType.RESEARCH, "research keyword detected", TASK_MODELS[TaskType.RESEARCH])
+        return RouteResult(TaskType.RESEARCH, "research keyword", TASK_MODELS[TaskType.RESEARCH])
 
-    # VLM keywords without image — still route to LLM but note the intent
     if _VLM_RE.search(message):
-        return RouteResult(TaskType.LLM, "image analysis keywords but no image attached", TASK_MODELS[TaskType.LLM])
+        # VLM-слова без картинки — отвечаем текстом
+        return RouteResult(TaskType.LLM, "vlm keywords but no image", TASK_MODELS[TaskType.LLM])
+
+    # Короткие простые запросы → быстрая модель
+    if len(message.strip()) < 60:
+        return RouteResult(TaskType.LLM, "short message → fast model", FAST_MODEL)
 
     return RouteResult(TaskType.LLM, "default text", TASK_MODELS[TaskType.LLM])
 
 
 async def route_with_llm(message: str) -> RouteResult:
-    """Advanced classification using LLM (for ambiguous cases).
-    Falls back to regex-based routing on failure.
-    """
+    """Расширенная классификация через LLM для неоднозначных случаев."""
     from services.mws_client import chat_complete
 
-    prompt = f"""Classify this user message into exactly ONE category. Output ONLY the category name.
+    prompt = f"""Classify this user message into exactly ONE category. Output ONLY the category name, nothing else.
 
 Categories:
 - llm: regular text conversation, questions, coding help
@@ -111,8 +120,11 @@ Message: {message[:300]}
 Category:"""
 
     try:
-        result = await chat_complete([{"role": "user", "content": prompt}])
-        category = result.strip().lower().replace('"', '').replace("'", "")
+        result = await chat_complete(
+            [{"role": "user", "content": prompt}],
+            model="mws-gpt-alpha",  # быстрая модель для классификации
+        )
+        category = result.strip().lower().replace('"', "").replace("'", "")
 
         task_map = {
             "llm": TaskType.LLM,
