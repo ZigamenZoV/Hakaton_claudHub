@@ -166,3 +166,31 @@ async def list_models() -> list[dict]:
         r = await client.get(f"{MWS_BASE}/v1/models", headers=_HEADERS)
         r.raise_for_status()
         return r.json().get("data", [])
+
+
+# ---------- Local service fallbacks ----------
+VLM_URL = os.getenv("VLM_URL", "http://vlm:8003")
+SD_URL = os.getenv("SD_URL", "http://sd_api:8002")
+
+
+async def analyze_image_local(image_data: bytes, prompt: str = "Describe this image in detail.") -> str:
+    """Fallback: analyze image via local moondream2 service."""
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(
+            f"{VLM_URL}/analyze",
+            files={"file": ("image.png", image_data, "image/png")},
+            data={"prompt": prompt},
+        )
+        r.raise_for_status()
+        return r.json()["answer"]
+
+
+async def generate_image_local(prompt: str) -> bytes:
+    """Fallback: generate image via local SD 1.5 service. Returns PNG bytes."""
+    async with httpx.AsyncClient(timeout=300) as client:
+        r = await client.post(
+            f"{SD_URL}/generate",
+            json={"prompt": prompt, "steps": 20, "width": 512, "height": 512},
+        )
+        r.raise_for_status()
+        return r.content

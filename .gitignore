@@ -7,3 +7,6 @@ chroma_data/
 whisper_cache/
 ollama_data/
 open_webui_data/
+node_modules/
+dist/
+*.log

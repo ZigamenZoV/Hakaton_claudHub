@@ -12,3 +12,5 @@ python-pptx==1.0.2
 markdown==3.7
 weasyprint==62.3
 trafilatura==1.12.2
+selectolax==0.3.21
+qdrant-client==1.11.2
